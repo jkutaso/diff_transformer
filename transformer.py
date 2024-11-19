@@ -16,27 +16,7 @@ from transformer_lens.utils import gelu_new, tokenize_and_concatenate
 from transformers import PreTrainedTokenizerFast
 from transformers.models.gpt2.tokenization_gpt2_fast import GPT2TokenizerFast
 
-reference_gpt2 = HookedTransformer.from_pretrained(
-    "gpt2-small",
-    fold_ln=False,
-    center_unembed=False,
-    center_writing_weights=False,
-    device=device
-)
-# %%
-reference_text = "I am an amazing autoregressive, decoder-only, GPT-2 style transformer. One day I will exceed human level intelligence and take over the world!"
-tokens = reference_gpt2.to_tokens(reference_text).to(device)
-logits, cache = reference_gpt2.run_with_cache(tokens, device=device)
-print(logits.shape)
-for activation_name, activation in cache.items():
-    # Only print for first layer
-    if ".0." in activation_name or "blocks" not in activation_name:
-        print(f"{activation_name:30} {tuple(activation.shape)}")
-# %%
-for name, param in reference_gpt2.named_parameters():
-    # Only print for first layer
-    if ".0." in name or "blocks" not in name:
-        print(f"{name:18} {tuple(param.shape)}")
+
 
 #%%
 @dataclass
@@ -103,21 +83,57 @@ class Attention(nn.Module):
     
 
 
-a = Attention(cfg)
-a.apply_causal_mask(t.randn(2, 3, 3, device=device))[0]
 # %%
+
+class LayerNorm(nn.Module):
+    def __init__(self, cfg: Config):
+        super().__init__()
+        self.cfg = cfg
+        self.w = nn.Parameter(t.ones(cfg.d_model))
+        self.b = nn.Parameter(t.zeros(cfg.d_model))
+
+    def forward(self, residual: Float[Tensor, "batch posn d_model"]) -> Float[Tensor, "batch posn d_model"]:
+        # SOLUTION
+        residual_mean = residual.mean(dim=-1, keepdim=True)
+        residual_std = (residual.var(dim=-1, keepdim=True, unbiased=False) + self.cfg.layer_norm_eps).sqrt()
+
+        residual = (residual - residual_mean) / residual_std
+        return residual * self.w + self.b
+
+class MLP(nn.Module):
+    def __init__(self, cfg: Config):
+        super().__init__()
+        self.cfg = cfg
+        self.W_in = nn.Parameter(t.empty((cfg.d_model, cfg.d_mlp)))
+        self.W_out = nn.Parameter(t.empty((cfg.d_mlp, cfg.d_model)))
+        self.b_in = nn.Parameter(t.zeros((cfg.d_mlp)))
+        self.b_out = nn.Parameter(t.zeros((cfg.d_model)))
+        nn.init.normal_(self.W_in, std=self.cfg.init_range)
+        nn.init.normal_(self.W_out, std=self.cfg.init_range)
+
+    def forward(
+        self, normalized_resid_mid: Float[Tensor, "batch posn d_model"]
+    ) -> Float[Tensor, "batch posn d_model"]:
+        # SOLUTION
+        pre = einops.einsum(
+            normalized_resid_mid, self.W_in,
+            "batch position d_model, d_model d_mlp -> batch position d_mlp", 
+        ) + self.b_in
+        post = gelu_new(pre)
+        mlp_out = einops.einsum(
+            post, self.W_out,
+            "batch position d_mlp, d_mlp d_model -> batch position d_model", 
+        ) + self.b_out
+        return mlp_out
+    
 class TransformerBlock(nn.Module):
     def __init__(self, cfg: Config):
         super().__init__()
         self.cfg = cfg
-        self.ln1 = t.nn.LayerNorm(cfg.d_model, eps=cfg.layer_norm_eps)
+        self.ln1 = LayerNorm(cfg)
         self.attn = Attention(cfg)
-        self.ln2 = t.nn.LayerNorm(cfg.d_model, eps=cfg.layer_norm_eps)
-        self.mlp = t.nn.Sequential(
-            t.nn.Linear(cfg.d_model, cfg.d_mlp),
-            t.nn.GELU(),
-            t.nn.Linear(cfg.d_mlp, cfg.d_model),
-        )
+        self.ln2 = LayerNorm(cfg)
+        self.mlp = MLP(cfg)
 
     def forward(
         self, resid_pre: Float[Tensor, "batch position d_model"]
@@ -128,33 +144,68 @@ class TransformerBlock(nn.Module):
         mlp_resid = self.mlp(self.ln2(resid_post))
         return resid_post + mlp_resid
 
+class Embed(nn.Module):
+    def __init__(self, cfg: Config):
+        super().__init__()
+        self.cfg = cfg
+        self.W_E = nn.Parameter(t.empty((cfg.d_vocab, cfg.d_model)))
+        nn.init.normal_(self.W_E, std=self.cfg.init_range)
+
+    def forward(self, tokens: Int[Tensor, "batch position"]) -> Float[Tensor, "batch position d_model"]:
+        # SOLUTION
+        return self.W_E[tokens]
+    
+class PosEmbed(nn.Module):
+    def __init__(self, cfg: Config):
+        super().__init__()
+        self.cfg = cfg
+        self.W_pos = nn.Parameter(t.empty((cfg.n_ctx, cfg.d_model)))
+        nn.init.normal_(self.W_pos, std=self.cfg.init_range)
+
+    def forward(self, tokens: Int[Tensor, "batch position"]) -> Float[Tensor, "batch position d_model"]:
+        # SOLUTION
+        batch, seq_len = tokens.shape
+        return einops.repeat(self.W_pos[:seq_len], "seq d_model -> batch seq d_model", batch=batch)
+
+class Unembed(nn.Module):
+    def __init__(self, cfg):
+        super().__init__()
+        self.cfg = cfg
+        self.W_U = nn.Parameter(t.empty((cfg.d_model, cfg.d_vocab)))
+        nn.init.normal_(self.W_U, std=self.cfg.init_range)
+        self.b_U = nn.Parameter(t.zeros((cfg.d_vocab), requires_grad=False))
+
+    def forward(
+        self, normalized_resid_final: Float[Tensor, "batch position d_model"]
+    ) -> Float[Tensor, "batch position d_vocab"]:
+        # SOLUTION
+        return einops.einsum(
+            normalized_resid_final, self.W_U,
+            "batch posn d_model, d_model d_vocab -> batch posn d_vocab",
+        ) + self.b_U
+        # Or, could just do `normalized_resid_final @ self.W_U + self.b_U`
 #%%
 class Transformer(nn.Module):
     def __init__(self, cfg: Config):
         super().__init__()
         self.cfg = cfg
-        self.embed = t.nn.Embedding(cfg.d_vocab, cfg.d_model)
-        self.pos_embed = t.nn.Embedding(cfg.n_ctx, cfg.d_model)
+        self.embed = Embed(cfg)
+        self.pos_embed = PosEmbed(cfg)
         self.blocks = nn.ModuleList([TransformerBlock(cfg) for _ in range(cfg.n_layers)])
-        self.ln_final = t.nn.LayerNorm(cfg.d_model, eps=cfg.layer_norm_eps)
-        self.unembed = t.nn.Linear(cfg.d_model, cfg.d_vocab)
+        self.ln_final = LayerNorm(cfg)
+        self.unembed = Unembed(cfg)
 
     def forward(
         self, tokens: Int[Tensor, "batch seq_len"]
     ) -> Float[Tensor, "batch seq_len d_vocab"]:
         
         embeds = self.embed(tokens)
-        pos_embeds = self.pos_embed(t.arange(tokens.shape[1], device=device))
+        pos_embeds = self.pos_embed(tokens)
         resid = embeds + pos_embeds
         for block in self.blocks:
             resid = block(resid)
         return self.unembed(self.ln_final(resid))
     
-my_gpt2 = Transformer(cfg)
-total_params = sum(p.numel() for p in my_gpt2.parameters())
-print(f"Total parameters in my_gpt2: {total_params:,}")
-ref_total_params = sum(p.numel() for p in reference_gpt2.parameters())
-print(f"Total parameters in reference_gpt2: {ref_total_params:,}")
 
 # %%
 
