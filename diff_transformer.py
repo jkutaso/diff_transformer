@@ -37,7 +37,7 @@ cfg = Config()
 
 class Attention(nn.Module):
 
-    def __init__(self, cfg: Config):
+    def __init__(self, cfg: Config, layer_idx: int = 1):
         super().__init__()
         self.cfg = cfg
         self.W_Q = nn.Parameter(t.empty((cfg.n_heads, cfg.d_model, cfg.d_head)))
@@ -48,6 +48,11 @@ class Attention(nn.Module):
         self.b_K = nn.Parameter(t.zeros((cfg.n_heads, cfg.d_head)))
         self.b_V = nn.Parameter(t.zeros((cfg.n_heads, cfg.d_head)))
         self.b_O = nn.Parameter(t.zeros((cfg.d_model)))
+        self.lambda_q_1 = nn.Parameter(t.zeros((cfg.d_head//2)))
+        self.lambda_q_2 = nn.Parameter(t.zeros((cfg.d_head//2)))
+        self.lambda_k_1 = nn.Parameter(t.zeros((cfg.d_head//2)))
+        self.lambda_k_2 = nn.Parameter(t.zeros((cfg.d_head//2)))
+        self.lambda_init = 0.8 - 0.6 * math.exp(-0.3 * (layer_idx - 1))
         nn.init.normal_(self.W_Q, std=self.cfg.init_range)
         nn.init.normal_(self.W_K, std=self.cfg.init_range)
         nn.init.normal_(self.W_V, std=self.cfg.init_range)
@@ -70,12 +75,19 @@ class Attention(nn.Module):
         self, normalized_resid_pre: Float[Tensor, "batch posn d_model"]
     ) -> Float[Tensor, "batch posn d_model"]:
         K = einops.einsum(normalized_resid_pre, self.W_K, "batch posn d_model, n_heads d_model d_head -> batch posn n_heads d_head") + self.b_K
+        K1, K2 = K.chunk(2, dim=-1)
         V = einops.einsum(normalized_resid_pre, self.W_V, "batch posn d_model, n_heads d_model d_head -> batch posn n_heads d_head") + self.b_V
         Q = einops.einsum(normalized_resid_pre, self.W_Q, "batch posn d_model, n_heads d_model d_head -> batch posn n_heads d_head") + self.b_Q
-        attn_scores = einops.einsum(Q, K, "batch q_posn n_heads d_head, batch k_posn n_heads d_head -> batch n_heads q_posn k_posn")
-        attn_scores = attn_scores / math.sqrt(self.cfg.d_head)
-        attn_scores = self.apply_causal_mask(attn_scores)
-        attn_probabilities = F.softmax(attn_scores, dim=-1)
+        Q1, Q2 = Q.chunk(2, dim=-1)
+        attn_scores_1 = einops.einsum(Q1, K1, "batch q_posn n_heads d_head, batch k_posn n_heads d_head -> batch n_heads q_posn k_posn")
+        attn_scores_2 = einops.einsum(Q2, K2, "batch q_posn n_heads d_head, batch k_posn n_heads d_head -> batch n_heads q_posn k_posn")
+        
+        attn_scores_1 = attn_scores_1 / math.sqrt(self.cfg.d_head)
+        attn_scores_2 = attn_scores_2 / math.sqrt(self.cfg.d_head)
+        attn_scores_1 = self.apply_causal_mask(attn_scores_1)
+        attn_scores_2 = self.apply_causal_mask(attn_scores_2)
+        this_lambda = t.exp(self.lambda_q_1 * self.lambda_k_1) - t.exp(self.lambda_q_2 * self.lambda_k_2) + self.lambda_init
+        attn_probabilities = F.softmax(attn_scores_1, dim=-1) - this_lambda * F.softmax(attn_scores_2, dim=-1)
         z = einops.einsum(attn_probabilities, V, "batch n_heads q_posn k_posn, batch k_posn n_heads d_head -> batch q_posn n_heads d_head") 
         result = einops.einsum(z, self.W_O, "batch q_posn n_heads d_head, n_heads d_head d_model -> batch q_posn d_head d_model") 
         return result.sum(dim=-2) + self.b_O
@@ -124,11 +136,11 @@ class MLP(nn.Module):
         return mlp_out
     
 class TransformerBlock(nn.Module):
-    def __init__(self, cfg: Config):
+    def __init__(self, cfg: Config, layer_idx: int = 1):
         super().__init__()
         self.cfg = cfg
         self.ln1 = LayerNorm(cfg)
-        self.attn = Attention(cfg)
+        self.attn = Attention(cfg, layer_idx)
         self.ln2 = LayerNorm(cfg)
         self.mlp = MLP(cfg)
 
@@ -188,7 +200,7 @@ class Transformer(nn.Module):
         self.cfg = cfg
         self.embed = Embed(cfg)
         self.pos_embed = PosEmbed(cfg)
-        self.blocks = nn.ModuleList([TransformerBlock(cfg) for _ in range(cfg.n_layers)])
+        self.blocks = nn.ModuleList([TransformerBlock(cfg, i) for i in range(cfg.n_layers)])
         self.ln_final = LayerNorm(cfg)
         self.unembed = Unembed(cfg)
 
