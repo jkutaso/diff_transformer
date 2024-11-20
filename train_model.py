@@ -12,9 +12,12 @@ from typing import Any
 from torch import Tensor
 from jaxtyping import Int, Float
 import einops
-import tqdm
-
+from tqdm import tqdm
+import pandas as pd
+import os
+os.environ["TOKENIZERS_PARALLELISM"] = "false"
 device = t.device('mps' if t.backends.mps.is_available() else 'cuda' if t.cuda.is_available() else 'cpu')
+print(device)
 #%%
 tokenizer = GPT2TokenizerFast.from_pretrained("gpt2")
 tokenizer
@@ -45,15 +48,15 @@ print(tokenized_dataset)
 class TransformerTrainingArgs():
     batch_size = 16
     epochs = 10
-    max_steps_per_epoch = 200
+    max_steps_per_epoch = 500
     lr = 1e-3
     weight_decay = 1e-2
 
 args = TransformerTrainingArgs()
 
 dataset_dict = tokenized_dataset.train_test_split(test_size=1000)
-train_loader = DataLoader(dataset_dict["train"], batch_size=args.batch_size, shuffle=True, num_workers=4, pin_memory=True)
-test_loader = DataLoader(dataset_dict["test"], batch_size=args.batch_size, shuffle=False, num_workers=4, pin_memory=True)
+train_loader = DataLoader(dataset_dict["train"], batch_size=args.batch_size, shuffle=True, num_workers=16, pin_memory=True)
+test_loader = DataLoader(dataset_dict["test"], batch_size=args.batch_size, shuffle=False, num_workers=16, pin_memory=True)
 # %%
 first_batch = train_loader.dataset[:args.batch_size]
 
@@ -138,10 +141,23 @@ class TransformerTrainer:
 
     def train_loader(self) -> DataLoader:
         '''Returns train loader (as in code above).'''
-        return DataLoader(dataset_dict["train"], batch_size=self.args.batch_size, shuffle=True, num_workers=4, pin_memory=True)
+        return DataLoader(dataset_dict["train"], batch_size=self.args.batch_size, shuffle=True, num_workers=16, pin_memory=True)
 
 
     def test_loader(self) -> DataLoader:
         '''Returns test loader (as in code above).'''
-        return DataLoader(dataset_dict["test"], batch_size=self.args.batch_size, shuffle=False, num_workers=4, pin_memory=True)
+        return DataLoader(dataset_dict["test"], batch_size=self.args.batch_size, shuffle=False, num_workers=16, pin_memory=True)
+# %%
+base_model = Transformer(base_cfg).to(device)
+trainer = TransformerTrainer(args, base_model)
+trainer.train()
+# %%
+diff_model = DiffTransformer(diff_cfg).to(device)
+diff_trainer = TransformerTrainer(args, diff_model)
+diff_trainer.train()
+# %%
+len(trainer.validation_accuracy)
+# %%
+results_df = pd.DataFrame({'base_training_loss': trainer.training_loss, 'base_validation_accuracy': trainer.validation_accuracy, 'diff_training_loss': diff_trainer.training_loss, 'diff_validation_accuracy': diff_trainer.validation_accuracy})
+results_df.to_csv(f'results/example_results.csv')
 # %%

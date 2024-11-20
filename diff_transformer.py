@@ -102,7 +102,9 @@ class Attention(nn.Module):
         attn_scores_2 = attn_scores_2 / math.sqrt(self.cfg.d_head)
         attn_scores_1 = self.apply_causal_mask(attn_scores_1)
         attn_scores_2 = self.apply_causal_mask(attn_scores_2)
-        this_lambda = t.exp(self.lambda_q_1 * self.lambda_k_1) - t.exp(self.lambda_q_2 * self.lambda_k_2) + self.lambda_init
+        this_lambda = t.exp(t.dot(self.lambda_q_1, self.lambda_k_1)) - t.exp(t.dot(self.lambda_q_2, self.lambda_k_2)) + self.lambda_init
+        print(this_lambda)
+        print(attn_scores_1.shape, attn_scores_2.shape)
         attn_probabilities = F.softmax(attn_scores_1, dim=-1) - this_lambda * F.softmax(attn_scores_2, dim=-1)
         z = einops.einsum(attn_probabilities, V, "batch n_heads q_posn k_posn, batch k_posn n_heads d_head -> batch q_posn n_heads d_head") 
         result = einops.einsum(z, self.W_O, "batch q_posn n_heads d_head, n_heads d_head d_model -> batch q_posn d_head d_model") 

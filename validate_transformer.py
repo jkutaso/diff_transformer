@@ -16,7 +16,8 @@ from transformer_lens.utils import gelu_new, tokenize_and_concatenate
 from transformers import PreTrainedTokenizerFast
 from transformers.models.gpt2.tokenization_gpt2_fast import GPT2TokenizerFast
 
-from transformer import Transformer, Config
+from transformer import Transformer
+from diff_transformer import DiffTransformer, Config
 
 reference_gpt2 = HookedTransformer.from_pretrained(
     "gpt2-small",
@@ -56,3 +57,6 @@ def load_gpt2_test(cls, gpt2_layer, input):
     comparison = t.isclose(output, reference_output, atol=1e-4, rtol=1e-3)
     print(f"{comparison.sum()/comparison.numel():.2%} of the values are correct\n")
 load_gpt2_test(Transformer, reference_gpt2, tokens)
+# %%
+load_gpt2_test(DiffTransformer, reference_gpt2, tokens)
+# %%
