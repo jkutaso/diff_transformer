@@ -31,6 +31,22 @@ class Config:
     n_heads: int = 12
     n_layers: int = 12
 
+    def copy(self):
+        '''
+        Creates and returns a copy of this Config object.
+        '''
+        return Config(
+            d_model=self.d_model,
+            debug=self.debug,
+            layer_norm_eps=self.layer_norm_eps,
+            d_vocab=self.d_vocab,
+            init_range=self.init_range,
+            n_ctx=self.n_ctx,
+            d_head=self.d_head,
+            d_mlp=self.d_mlp,
+            n_heads=self.n_heads,
+            n_layers=self.n_layers
+        )
 
 cfg = Config()
 #%%
@@ -194,7 +210,7 @@ class Unembed(nn.Module):
         ) + self.b_U
         # Or, could just do `normalized_resid_final @ self.W_U + self.b_U`
 #%%
-class Transformer(nn.Module):
+class DiffTransformer(nn.Module):
     def __init__(self, cfg: Config):
         super().__init__()
         self.cfg = cfg
