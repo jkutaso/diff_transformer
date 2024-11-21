@@ -12,6 +12,7 @@ from typing import Any
 from torch import Tensor
 from jaxtyping import Int, Float
 import einops
+import matplotlib.pyplot as plt
 from tqdm import tqdm
 import pandas as pd
 import os
@@ -163,7 +164,7 @@ len(trainer.validation_accuracy)
 results_df = pd.DataFrame({'base_training_loss': trainer.training_loss, 'base_validation_accuracy': trainer.validation_accuracy, 'diff_training_loss': diff_trainer.training_loss, 'diff_validation_accuracy': diff_trainer.validation_accuracy})
 results_df.to_csv(f'results/example_results.csv')
 # %%
-import matplotlib.pyplot as plt
+
 
 plt.figure(figsize=(12,8))
 
