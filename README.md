@@ -1,2 +1,4 @@
 # diff_transformer
-I want to reproduce the results in the diff transformer paper
+Work in progress
+
+The goal here is to reproduce this paper: https://arxiv.org/pdf/2410.05258
