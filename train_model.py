@@ -48,7 +48,7 @@ print(tokenized_dataset)
 class TransformerTrainingArgs():
     batch_size = 16
     epochs = 10
-    max_steps_per_epoch = 500
+    max_steps_per_epoch = 100
     lr = 1e-3
     weight_decay = 1e-2
 
@@ -147,17 +147,41 @@ class TransformerTrainer:
     def test_loader(self) -> DataLoader:
         '''Returns test loader (as in code above).'''
         return DataLoader(dataset_dict["test"], batch_size=self.args.batch_size, shuffle=False, num_workers=16, pin_memory=True)
-# %%
-base_model = Transformer(base_cfg).to(device)
-trainer = TransformerTrainer(args, base_model)
-trainer.train()
+
 # %%
 diff_model = DiffTransformer(diff_cfg).to(device)
 diff_trainer = TransformerTrainer(args, diff_model)
 diff_trainer.train()
+# %%
+base_model = Transformer(base_cfg).to(device)
+trainer = TransformerTrainer(args, base_model)
+trainer.train()
+
 # %%
 len(trainer.validation_accuracy)
 # %%
 results_df = pd.DataFrame({'base_training_loss': trainer.training_loss, 'base_validation_accuracy': trainer.validation_accuracy, 'diff_training_loss': diff_trainer.training_loss, 'diff_validation_accuracy': diff_trainer.validation_accuracy})
 results_df.to_csv(f'results/example_results.csv')
 # %%
+import matplotlib.pyplot as plt
+
+plt.figure(figsize=(12,8))
+
+plt.subplot(2,1,1)
+plt.plot(results_df['base_training_loss'], label='Base Model')
+plt.plot(results_df['diff_training_loss'], label='Diff Model') 
+plt.title('Training Loss')
+plt.xlabel('Step')
+plt.ylabel('Loss')
+plt.legend()
+
+plt.subplot(2,1,2)
+plt.plot(results_df['base_validation_accuracy'], label='Base Model')
+plt.plot(results_df['diff_validation_accuracy'], label='Diff Model')
+plt.title('Validation Accuracy') 
+plt.xlabel('Step')
+plt.ylabel('Accuracy')
+plt.legend()
+
+plt.tight_layout()
+plt.show()
