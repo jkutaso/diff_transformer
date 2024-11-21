@@ -16,54 +16,16 @@ import matplotlib.pyplot as plt
 from tqdm import tqdm
 import pandas as pd
 import os
-os.environ["TOKENIZERS_PARALLELISM"] = "false"
-device = t.device('mps' if t.backends.mps.is_available() else 'cuda' if t.cuda.is_available() else 'cpu')
-print(device)
-#%%
-tokenizer = GPT2TokenizerFast.from_pretrained("gpt2")
-tokenizer
-#%%
-
-base_cfg = Config(
-    debug=False, 
-    d_model=256, 
-    n_heads=4, 
-    d_head=64, 
-    d_mlp=1024, 
-    n_layers=2, 
-    n_ctx=256, 
-    d_vocab=tokenizer.vocab_size
-)
-diff_cfg = base_cfg.copy()
-diff_cfg.d_head = base_cfg.d_head // 2
-diff_cfg
-#%%
-dataset = datasets.load_dataset("NeelNanda/pile-10k", split="train").remove_columns("meta")
-print(dataset)
-print(dataset[0]['text'][:100])
-#%%
-tokenized_dataset = tokenize_and_concatenate(dataset, tokenizer, device, max_length = base_cfg.n_ctx, column_name="text", add_bos_token=True, num_proc=4)
-print(tokenized_dataset)
+import json
 #%%
 @dataclass
 class TransformerTrainingArgs():
-    batch_size = 16
-    epochs = 10
-    max_steps_per_epoch = 100
-    lr = 1e-3
-    weight_decay = 1e-2
+    batch_size: int
+    epochs: int
+    max_steps_per_epoch: int
+    lr: float
+    weight_decay: float
 
-args = TransformerTrainingArgs()
-
-dataset_dict = tokenized_dataset.train_test_split(test_size=1000)
-train_loader = DataLoader(dataset_dict["train"], batch_size=args.batch_size, shuffle=True, num_workers=16, pin_memory=True)
-test_loader = DataLoader(dataset_dict["test"], batch_size=args.batch_size, shuffle=False, num_workers=16, pin_memory=True)
-# %%
-first_batch = train_loader.dataset[:args.batch_size]
-
-print(first_batch.keys())
-print(first_batch['tokens'].shape)
-#%%
 def get_log_probs(
     logits: Float[Tensor, "batch posn d_vocab"], 
     tokens: Int[Tensor, "batch posn"]
@@ -75,8 +37,57 @@ def get_log_probs(
 
     return log_probs_for_tokens
 
+@dataclass
+class ExperimentConfig:
+    n_layers: int
+    d_model: int
+    d_head: int
+    n_heads: int
+    n_ctx: int
+    max_steps_per_epoch: int
+    batch_size: int
+    epochs: int
+    lr: float
+    weight_decay: float
+    
+    def get_config_base(self, tokenizer) -> Config:
+        return Config(
+            debug=False,
+            d_model=self.d_model,
+            n_heads=self.n_heads,
+            d_head=self.d_head,
+            d_mlp=self.d_model * 4,
+            n_layers=self.n_layers,
+            n_ctx=self.n_ctx,
+            d_vocab=tokenizer.vocab_size
+        )
+    
+    def get_config_diff(self, tokenizer) -> Config:
+        cfg = self.get_config_base(tokenizer)
+        cfg.d_head = cfg.d_head // 2
+        return cfg
+    
+    def get_training_args(self) -> TransformerTrainingArgs:
+        return TransformerTrainingArgs(
+            batch_size=self.batch_size,
+            epochs=self.epochs,
+            max_steps_per_epoch=self.max_steps_per_epoch,
+            lr=self.lr,
+            weight_decay=self.weight_decay
+        )
+    def copy(self):
+        return ExperimentConfig(**vars(self))
+    
+@dataclass
+class TrainingMetrics:
+    step: int
+    epoch: int
+    training_loss: float
+    validation_accuracy: float
+
+
 class TransformerTrainer:
-    def __init__(self, args: TransformerTrainingArgs, model):
+    def __init__(self, args: TransformerTrainingArgs, model, experiment_config: ExperimentConfig, dataset_dict, device):
         super().__init__()
         self.model = model
         self.args = args
@@ -84,8 +95,10 @@ class TransformerTrainer:
         self.step = 0
         self.training_loss = []
         self.validation_accuracy = []
-
-
+        self.experiment_config = experiment_config
+        self.metrics: list[TrainingMetrics] = []
+        self.dataset_dict = dataset_dict
+        self.device = device
     def training_step(self, batch: dict[str, Int[Tensor, "batch seq"]]) -> Float[Tensor, ""]:
         '''
         Calculates the loss on the tokens in the batch, performs a gradient update step, and logs the loss.
@@ -94,7 +107,7 @@ class TransformerTrainer:
         '''
         # YOUR CODE HERE
         self.optimizer.zero_grad()
-        tokens = batch['tokens'].to(device)
+        tokens = batch['tokens'].to(self.device)
         logits = self.model(tokens)
         log_probs = get_log_probs(logits, tokens)
         loss = -log_probs.mean()
@@ -111,7 +124,7 @@ class TransformerTrainer:
         the whole validation set).
         '''
         # YOUR CODE HERE
-        tokens = batch['tokens'].to(device)
+        tokens = batch['tokens'].to(self.device)
         logits = self.model(tokens)[:, :-1]
         accuracy = (logits.argmax(dim=-1) == tokens[:, 1:]).flatten()
         return accuracy
@@ -136,53 +149,85 @@ class TransformerTrainer:
 
                 accuracy = t.cat([self.validation_step(batch) for batch in self.test_loader()])
                 mean_accuracy = accuracy.float().mean().item()
+                self.metrics.append(TrainingMetrics(
+                    step=self.step,
+                    epoch=epoch,
+                    training_loss=loss.item(),
+                    validation_accuracy=mean_accuracy
+                ))
                 progress_bar.set_description(f"Epoch {epoch+1} - Step {i+1} - Loss {loss:.4f} - Accuracy {mean_accuracy:.4f}")
                 self.training_loss.append(loss.item())
                 self.validation_accuracy.append(mean_accuracy)
 
     def train_loader(self) -> DataLoader:
         '''Returns train loader (as in code above).'''
-        return DataLoader(dataset_dict["train"], batch_size=self.args.batch_size, shuffle=True, num_workers=16, pin_memory=True)
+        return DataLoader(self.dataset_dict["train"], batch_size=self.args.batch_size, shuffle=True, num_workers=16, pin_memory=True)
 
 
     def test_loader(self) -> DataLoader:
         '''Returns test loader (as in code above).'''
-        return DataLoader(dataset_dict["test"], batch_size=self.args.batch_size, shuffle=False, num_workers=16, pin_memory=True)
+        return DataLoader(self.dataset_dict["test"], batch_size=self.args.batch_size, shuffle=False, num_workers=16, pin_memory=True)
 
-# %%
-diff_model = DiffTransformer(diff_cfg).to(device)
-diff_trainer = TransformerTrainer(args, diff_model)
-diff_trainer.train()
-# %%
-base_model = Transformer(base_cfg).to(device)
-trainer = TransformerTrainer(args, base_model)
-trainer.train()
+def train_both_models(experiment_config: ExperimentConfig, tokenizer, dataset_dict, device):
 
-# %%
-len(trainer.validation_accuracy)
-# %%
-results_df = pd.DataFrame({'base_training_loss': trainer.training_loss, 'base_validation_accuracy': trainer.validation_accuracy, 'diff_training_loss': diff_trainer.training_loss, 'diff_validation_accuracy': diff_trainer.validation_accuracy})
-results_df.to_csv(f'results/example_results.csv')
-# %%
+    base_cfg = experiment_config.get_config_base(tokenizer)
+    diff_cfg = experiment_config.get_config_diff(tokenizer)
+    training_args = experiment_config.get_training_args()
+    diff_model = DiffTransformer(diff_cfg).to(device)
+    diff_trainer = TransformerTrainer(training_args, diff_model, experiment_config, dataset_dict, device)
+    diff_trainer.train()
 
+    base_model = Transformer(base_cfg).to(device)
+    trainer = TransformerTrainer(training_args, base_model, experiment_config, dataset_dict, device)
+    trainer.train()
 
-plt.figure(figsize=(12,8))
+    return diff_trainer.metrics, trainer.metrics
 
-plt.subplot(2,1,1)
-plt.plot(results_df['base_training_loss'], label='Base Model')
-plt.plot(results_df['diff_training_loss'], label='Diff Model') 
-plt.title('Training Loss')
-plt.xlabel('Step')
-plt.ylabel('Loss')
-plt.legend()
-
-plt.subplot(2,1,2)
-plt.plot(results_df['base_validation_accuracy'], label='Base Model')
-plt.plot(results_df['diff_validation_accuracy'], label='Diff Model')
-plt.title('Validation Accuracy') 
-plt.xlabel('Step')
-plt.ylabel('Accuracy')
-plt.legend()
-
-plt.tight_layout()
-plt.show()
+def save_metrics(base_metrics: list[TrainingMetrics], diff_metrics: list[TrainingMetrics], experiment_config: ExperimentConfig):
+    serializable_result = {
+        "config": vars(experiment_config),
+        "base_metrics": [vars(metric) for metric in base_metrics],
+        "diff_metrics": [vars(metric) for metric in diff_metrics]
+    }
+    
+    for i in range(100):
+        results_path = f'results/results_{i}'
+        if not os.path.exists(results_path):
+            with open(results_path, 'w') as f:
+                json.dump(serializable_result, f)
+            return
+#%%
+if __name__ == "__main__":
+    os.environ["TOKENIZERS_PARALLELISM"] = "false"
+    device = t.device('mps' if t.backends.mps.is_available() else 'cuda' if t.cuda.is_available() else 'cpu')
+    print(device)
+    #%%
+    tokenizer = GPT2TokenizerFast.from_pretrained("gpt2")
+    #%%
+    experiment_config = ExperimentConfig(
+        n_layers = 2,
+        d_model = 16,
+        d_head = 8,
+        n_heads = 4,
+        n_ctx = 256,
+        batch_size = 16,
+        epochs = 10,
+        max_steps_per_epoch = 3,
+        lr = 1e-3,
+        weight_decay = 1e-2
+    )
+    base_cfg = experiment_config.get_config_base(tokenizer)
+    diff_cfg = experiment_config.get_config_diff(tokenizer)
+    #%%
+    dataset = datasets.load_dataset("NeelNanda/pile-10k", split="train").remove_columns("meta")
+    tokenized_dataset = tokenize_and_concatenate(dataset, tokenizer, device, max_length = base_cfg.n_ctx, column_name="text", add_bos_token=True, num_proc=4)
+    dataset_dict = tokenized_dataset.train_test_split(test_size=1000)
+    diff_metrics, base_metrics = train_both_models(experiment_config, tokenizer, dataset_dict, device)
+    save_metrics(base_metrics, diff_metrics, experiment_config)
+    
+    
+    #%%
+    with open('results/results_0', 'r') as f:
+        result = json.load(f)
+    # %%
+    result.keys()
