@@ -5,9 +5,25 @@ from transformers import GPT2TokenizerFast
 import torch as t
 import datasets
 import os
+import json
 os.environ["TOKENIZERS_PARALLELISM"] = "false"
 device = t.device('mps' if t.backends.mps.is_available() else 'cuda' if t.cuda.is_available() else 'cpu')
 print(device)
+
+def compare_result_config_to_experiment_config(result_config, experiment_config):
+    for key in result_config.keys():
+        if result_config[key] != getattr(experiment_config, key):
+            return False
+    return True
+
+def check_if_experiment_config_is_in_results(experiment_config):
+    for filename in os.listdir('results'):
+        if filename.startswith('results_'):
+            with open(f'results/{filename}', 'r') as f:
+                this_result = json.load(f)
+                if compare_result_config_to_experiment_config(this_result['config'], experiment_config):
+                    return True
+    return False
 
 first_experiment_config = ExperimentConfig(
     n_layers = 2,
@@ -21,7 +37,7 @@ first_experiment_config = ExperimentConfig(
     lr = 1e-3,
     weight_decay = 1e-2
 )
-
+ 
 all_experiment_configs = []
 d_model_list = [64, 128, 256]
 n_layers_list = [2, 4, 8]
@@ -41,6 +57,9 @@ tokenized_dataset = tokenize_and_concatenate(dataset, tokenizer, device, max_len
 dataset_dict = tokenized_dataset.train_test_split(test_size=1000)
 #%%
 for i, experiment_config in enumerate(all_experiment_configs):
+    if check_if_experiment_config_is_in_results(experiment_config):
+        print(f"Experiment config {i+1} already in results")
+        continue
     print(f"Training model {i+1} of {len(all_experiment_configs)}")
     base_cfg = experiment_config.get_config_base(tokenizer)
     diff_cfg = experiment_config.get_config_diff(tokenizer)
@@ -54,4 +73,6 @@ for i, experiment_config in enumerate(all_experiment_configs):
         import gc
         gc.collect()
         t.mps.empty_cache()
+# %%
+
 # %%
