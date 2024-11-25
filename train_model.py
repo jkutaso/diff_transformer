@@ -11,8 +11,6 @@ from dataclasses import dataclass
 from typing import Any
 from torch import Tensor
 from jaxtyping import Int, Float
-import einops
-import matplotlib.pyplot as plt
 from tqdm import tqdm
 import pandas as pd
 import os
